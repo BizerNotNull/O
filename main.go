@@ -14,6 +14,7 @@ import (
 	"runtime"
 	s "strings"
 	"time"
+	"unsafe"
 )
 
 var url, key, model, root string
@@ -34,6 +35,14 @@ type M struct {
 	Content    string `json:"content,omitempty"`
 	ToolCallID string `json:"tool_call_id,omitempty"`
 	ToolCalls  []T    `json:"tool_calls,omitempty"`
+}
+
+type arguments struct {
+	Path    string `json:"path"`
+	Content string `json:"content"`
+	Old     string `json:"old"`
+	New     string `json:"new"`
+	Command string `json:"command"`
 }
 
 func out(p string) bool {
@@ -58,10 +67,10 @@ func path(x string) (string, error) {
 }
 
 func run(t T) string {
-	a := map[string]string{}
+	var a arguments
 	j.Unmarshal([]byte(t.Function.Arguments), &a)
 	n := t.Function.Name
-	p, e := path(a["path"])
+	p, e := path(a.Path)
 	var b []byte
 	switch n {
 	case "read":
@@ -71,25 +80,25 @@ func run(t T) string {
 	case "write":
 		if e == nil {
 			if e = o.MkdirAll(f.Dir(p), 0755); e == nil {
-				e = o.WriteFile(p, []byte(a["content"]), 0644)
+				e = o.WriteFile(p, []byte(a.Content), 0644)
 			}
 		}
 	case "edit":
 		if e == nil {
 			b, e = o.ReadFile(p)
 		}
-		if e == nil && !bytes.Contains(b, []byte(a["old"])) {
+		if e == nil && !bytes.Contains(b, []byte(a.Old)) {
 			e = fmt.Errorf("old text not found")
 		}
 		if e == nil {
-			e = o.WriteFile(p, bytes.Replace(b, []byte(a["old"]), []byte(a["new"]), 1), 0644)
+			e = o.WriteFile(p, bytes.Replace(b, []byte(a.Old), []byte(a.New), 1), 0644)
 		}
 	case "bash":
 		c, x := context.WithTimeout(context.Background(), 30*time.Second)
 		defer x()
-		v := []string{"bash", "-lc", a["command"]}
+		v := []string{"bash", "-lc", a.Command}
 		if runtime.GOOS == "windows" {
-			v = []string{"powershell", "-NoProfile", "-Command", a["command"]}
+			v = []string{"powershell", "-NoProfile", "-Command", a.Command}
 		}
 		q := exec.CommandContext(c, v[0], v[1:]...)
 		q.Dir = root
@@ -101,7 +110,9 @@ func run(t T) string {
 		return "error: " + e.Error() + "\n" + string(b)
 	}
 	if n == "read" || n == "bash" {
-		return string(b)
+		// The returned string owns b's backing array, so avoiding a second copy is
+		// safe as long as the buffer is not mutated after this point.
+		return unsafe.String(unsafe.SliceData(b), len(b))
 	}
 	return "ok"
 }
